@@ -782,7 +782,7 @@ def discover_fortigate_license(section):
     if isinstance(section, dict):
         yield Service()
 
-def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
+def check_fortigate_license(params, section):
     if not section:
         yield Result(state=State.UNKNOWN, summary="No license data received")
         return
@@ -926,7 +926,7 @@ def discover_fortigate_license_item(section):
             continue
         yield Service(item=name)
 
-def check_fortigate_license_item(item, section, params=DEFAULT_LICENSE_PARAMS):
+def check_fortigate_license_item(item, params, section):
     if not section or section.get("status") != "success":
         yield Result(state=State.UNKNOWN, summary="No license data received")
         return
@@ -1010,7 +1010,7 @@ check_plugin_fortigate_license = CheckPlugin(
 )
 
 check_plugin_fortigate_license_item = CheckPlugin(
-    name="fortigate_license.item",
+    name="fortigate_license_item",
     sections=["fortigate_license"],
     service_name="FortiGate License %s",
     discovery_function=discover_fortigate_license_item,
