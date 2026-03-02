@@ -705,16 +705,19 @@ def check_fortigate_firmware(section):
 # FORTIGATE LICENSES (CONSOLIDATED, PARAMETERIZED)
 # =============================================================================
 
-# ---- Parser ----
+
+# ---- Parser: return {} instead of None so discovery can still run
 def parse_fortigate_license(string_table):
     """Parse fortigate_license section"""
     if not string_table:
-        return None
+        return {}  # return empty dict, not None -> discovery can still create service
     try:
         flatlist = list(itertools.chain.from_iterable(string_table))
         return json.loads(" ".join(flatlist))
     except (json.JSONDecodeError, ValueError, TypeError):
-        return {"error": "JSON parse failed"}
+        # Still return a dict so discovery yields a service and check can show the parse error
+        return {"status": "error", "error": "parse", "message": "JSON parse failed"}
+
 
 # ---- Defaults (tunable via WATO) ----
 DEFAULT_LICENSE_PARAMS = {
@@ -782,11 +785,12 @@ def _merge_params_for_module(module: str, params: dict) -> dict:
         p["expiry"] = merged_expiry
     return p
 
-# ---- Aggregated service ----
+# ---- Discovery: do not require 'status' to be 'success'
 def discover_fortigate_license(section):
-    if section and section.get("status") == "success":
+    """Aggregated service (one per host) - permissive discovery"""
+    if isinstance(section, dict):
         yield Service()
-
+        
 def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
     if not section:
         yield Result(state=State.UNKNOWN, summary="No license data received")
