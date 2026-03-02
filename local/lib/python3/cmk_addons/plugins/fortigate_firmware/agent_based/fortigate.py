@@ -1005,6 +1005,7 @@ def check_fortigate_license_item(item, section, params=DEFAULT_LICENSE_PARAMS):
         dleft = _days_left(now_ts, exp_ts)
         if dleft >= 0:
             yield Metric("days_to_expiry", dleft)
+
 # =============================================================================
 # PLUGIN REGISTRATION
 # =============================================================================
@@ -1038,12 +1039,21 @@ agent_section_fortigate_license = AgentSection(
     parse_function=parse_fortigate_license,
 )
 
+check_plugin_fortigate_license = CheckPlugin(
+    name="fortigate_license",
+    service_name="FortiGate Licenses",
+    discovery_function=discover_fortigate_license,
+    check_function=check_fortigate_license,
+)
+
 check_plugin_fortigate_license_item = CheckPlugin(
-    name="fortigate_license.item",               # different plugin name
-    sections=["fortigate_license"],              # reuse same agent section
+    name="fortigate_license.item",
+    sections=["fortigate_license"],
     service_name="FortiGate License %s",
     discovery_function=discover_fortigate_license_item,
     check_function=check_fortigate_license_item,
-    check_ruleset_name="fortigate_license",      # reuse same ruleset
+    check_ruleset_name="fortigate_license",
     check_default_parameters=DEFAULT_LICENSE_PARAMS,
 )
+
+
