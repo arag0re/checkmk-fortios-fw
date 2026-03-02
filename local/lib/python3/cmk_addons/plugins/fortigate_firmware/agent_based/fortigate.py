@@ -13,6 +13,8 @@ from cmk.agent_based.v2 import (
     Metric
 )
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import List, Tuple
 import itertools
 import json
 
@@ -460,6 +462,233 @@ def check_fortigate_firmware(section):
         yield Metric("minor_versions_behind", minor_versions_behind)
 
 # =============================================================================
+# FORTIGATE LICENSES
+# =============================================================================
+
+def parse_fortigate_license(string_table):
+    """Parse fortigate_license section"""
+    if not string_table:
+        return None
+
+    try:
+        flatlist = list(itertools.chain.from_iterable(string_table))
+        json_str = " ".join(flatlist)
+        data = json.loads(json_str)
+        return data
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "JSON parse failed"}
+
+def discover_fortigate_license(section):
+    """Discovery function for FortiGate Licenses"""
+    if section and section.get("status") == "success":
+        yield Service()
+
+def check_fortigate_license(section):
+    """
+    Check licenses/entitlements:
+      - Summarizes how many modules are licensed/free/no_license
+      - Warns/CRIT on approaching expiration (default WARN<=14d, CRIT<=3d)
+      - CRIT if any license has already expired
+      - Warns if FortiGuard connectivity reports an issue
+    Metrics:
+      - licenses_total, licenses_licensed, licenses_free, licenses_no_license
+      - licenses_expiring_soon, licenses_expired
+      - days_to_earliest_expiry (if applicable)
+    """
+    if not section:
+        yield Result(state=State.UNKNOWN, summary="No license data received")
+        return
+
+    # Unified error handling similar to other sections
+    if "error" in section or section.get("status") == "error":
+        err_type = str(section.get("error", "")).lower()
+        msg = section.get("message") or section.get("error") or "Cannot retrieve license information"
+        detail = section.get("detail")
+
+        unknown_hints = [
+            "no route to host", "failed to connect", "failed to establish",
+            "dns", "resolution", "refused", "timed out", "timeout",
+        ]
+        is_unknown = (
+            err_type in ("connection", "timeout")
+            or any(h in str(msg).lower() for h in unknown_hints)
+            or (detail and any(h in str(detail).lower() for h in unknown_hints))
+        )
+        # Connection issues -> UNKNOWN, other errors -> WARN
+        state = State.UNKNOWN if is_unknown else State.WARN
+        yield Result(state=state, summary=f"Cannot check licenses: {msg}", details=(detail or None))
+        return
+
+    if section.get("status") != "success":
+        yield Result(state=State.WARN, summary="Cannot retrieve license information")
+        return
+
+    results = section.get("results") or {}
+    if not isinstance(results, dict):
+        yield Result(state=State.UNKNOWN, summary="Invalid license payload format")
+        return
+
+    # Thresholds (could later be made configurable via parameters)
+    WARN_DAYS = 14
+    CRIT_DAYS = 3
+
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+
+    total_modules = 0
+    licensed_modules = 0
+    free_modules = 0
+    no_license_modules = 0
+    expiring_warn: List[Tuple[str, int, int]] = []   # (name, days_left, expiry_ts)
+    expiring_crit: List[Tuple[str, int, int]] = []
+    expired: List[Tuple[str, int]] = []              # (name, expiry_ts)
+
+    # Track earliest expiry
+    earliest_name = None
+    earliest_ts = None
+    earliest_days = None
+
+    # FortiGuard connectivity signals
+    fortiguard_issue = False
+    fortiguard_reason = None
+
+    def _days_left(exp_ts: int) -> int:
+        # Round down in days
+        return int((exp_ts - now_ts) // 86400)
+
+    def _fmt_date(exp_ts: int) -> str:
+        try:
+            return datetime.fromtimestamp(int(exp_ts), tz=timezone.utc).date().isoformat()
+        except Exception:
+            return str(exp_ts)
+
+    # Iterate modules in results
+    for name, entry in results.items():
+        if not isinstance(entry, dict):
+            continue
+
+        mtype = entry.get("type")
+        status = entry.get("status")
+
+        # FortiGuard connectivity handling (no explicit "status")
+        if name == "fortiguard":
+            connected = bool(entry.get("connected", True))
+            conn_issue = bool(entry.get("connection_issue", False))
+            if (not connected) or conn_issue:
+                fortiguard_issue = True
+                fortiguard_reason = "FortiGuard connectivity issue (not connected)" if not connected else "FortiGuard connectivity issue (connection_issue=true)"
+            # Do not count this as a license module with status categories below; continue
+            continue
+
+        # Some entries (like forticloud) may carry non-license states (e.g. "cloud_logged_in")
+        # We still count them in totals, but only classify "licensed", "free_license", "no_license" explicitly
+        total_modules += 1
+
+        status_lower = str(status or "").lower()
+        if status_lower == "licensed":
+            licensed_modules += 1
+        elif status_lower == "free_license":
+            free_modules += 1
+        elif status_lower == "no_license":
+            no_license_modules += 1
+        # else: unknown/other states kept neutral in counts
+
+        # Expiration checks
+        expires = entry.get("expires")
+        if isinstance(expires, (int, float, str)):
+            try:
+                exp_ts = int(expires)
+            except Exception:
+                exp_ts = None
+        else:
+            exp_ts = None
+
+        if exp_ts:
+            dleft = _days_left(exp_ts)
+            # Track earliest
+            if earliest_ts is None or exp_ts < earliest_ts:
+                earliest_ts = exp_ts
+                earliest_days = dleft
+                earliest_name = name
+
+            if dleft < 0:
+                expired.append((name, exp_ts))
+            elif dleft <= CRIT_DAYS:
+                expiring_crit.append((name, dleft, exp_ts))
+            elif dleft <= WARN_DAYS:
+                expiring_warn.append((name, dleft, exp_ts))
+
+    # Build summary + state
+    summary_parts = [
+        f"Licensed: {licensed_modules}/{total_modules}",
+        f"Free: {free_modules}",
+        f"No license: {no_license_modules}",
+    ]
+
+    if earliest_ts is not None:
+        if earliest_days is not None and earliest_days >= 0:
+            summary_parts.append(f"Earliest expiry: {earliest_name} in {earliest_days}d ({_fmt_date(earliest_ts)})")
+        else:
+            summary_parts.append(f"Earliest expiry: {earliest_name} expired on {_fmt_date(earliest_ts)}")
+
+    if fortiguard_issue:
+        summary_parts.append("FortiGuard connectivity: issue detected")
+
+    # Determine overall state
+    if expired:
+        state = State.CRIT
+        status_prefix = "Expired licenses detected"
+    elif expiring_crit:
+        state = State.CRIT
+        status_prefix = f"Licenses expiring ≤{CRIT_DAYS}d"
+    elif expiring_warn or fortiguard_issue:
+        state = State.WARN
+        # Prefer explicit expiring warn message if present
+        status_prefix = f"Licenses expiring ≤{WARN_DAYS}d" if expiring_warn else "FortiGuard connectivity issue"
+    else:
+        state = State.OK
+        status_prefix = "All licenses OK"
+
+    # Details list
+    details_lines: List[str] = []
+
+    if expired:
+        details_lines.append("Expired:")
+        for name, ts in sorted(expired, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: expired on {_fmt_date(ts)}")
+
+    if expiring_crit:
+        details_lines.append(f"Expiring within {CRIT_DAYS} days:")
+        for name, dleft, ts in sorted(expiring_crit, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: {dleft}d left (until {_fmt_date(ts)})")
+
+    if expiring_warn:
+        details_lines.append(f"Expiring within {WARN_DAYS} days:")
+        # Note: ensure we don't duplicate those already listed as CRIT
+        for name, dleft, ts in sorted(expiring_warn, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: {dleft}d left (until {_fmt_date(ts)})")
+
+    if fortiguard_issue:
+        details_lines.append(f"FortiGuard: {fortiguard_reason or 'connectivity problem detected'}")
+
+    # Yield result
+    yield Result(
+        state=state,
+        summary=f"{status_prefix} | " + " | ".join(summary_parts),
+        details="\n".join(details_lines) if details_lines else None,
+    )
+
+    # Metrics
+    yield Metric("licenses_total", total_modules)
+    yield Metric("licenses_licensed", licensed_modules)
+    yield Metric("licenses_free", free_modules)
+    yield Metric("licenses_no_license", no_license_modules)
+    yield Metric("licenses_expiring_soon", len(expiring_warn) + len(expiring_crit))
+    yield Metric("licenses_expired", len(expired))
+
+    if earliest_ts is not None and (earliest_days is not None) and earliest_days >= 0:
+        yield Metric("days_to_earliest_expiry", earliest_days)
+
+# =============================================================================
 # PLUGIN REGISTRATION
 # =============================================================================
 
@@ -485,6 +714,18 @@ check_plugin_fortigate_firmware = CheckPlugin(
     service_name="FortiGate Firmware Updates",
     discovery_function=discover_fortigate_firmware,
     check_function=check_fortigate_firmware,
+)
+
+agent_section_fortigate_license = AgentSection(
+    name="fortigate_license",
+    parse_function=parse_fortigate_license,
+)
+
+check_plugin_fortigate_license = CheckPlugin(
+    name="fortigate_license",
+    service_name="FortiGate Licenses",
+    discovery_function=discover_fortigate_license,
+    check_function=check_fortigate_license,
 )
 
 
