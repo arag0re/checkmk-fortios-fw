@@ -4,7 +4,6 @@ CheckMK Agent-based check plugin for FortiGate monitoring
 Enhanced version with detailed firmware update information
 """
 
-
 from cmk.agent_based.v2 import (
     AgentSection, 
     CheckPlugin, 
@@ -16,9 +15,7 @@ from cmk.agent_based.v2 import (
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 from typing import List, Tuple
-import itertools
-import re
-import json
+import itertools, re, json
 
 # =============================================================================
 # FORTIGATE LICENSES (AGGREGATED SERVICE)
