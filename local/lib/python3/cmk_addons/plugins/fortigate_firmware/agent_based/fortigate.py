@@ -16,7 +16,249 @@ from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 from typing import List, Tuple
 import itertools
+import re
 import json
+
+# =============================================================================
+# FORTIGATE LICENSES (AGGREGATED SERVICE)
+# =============================================================================
+
+# Default rule parameters (can be overridden via WATO)
+DEFAULT_LICENSE_PARAMS = {
+    "status_severity": {           # overall default severity by module status
+        "licensed": "OK",
+        "free_license": "WARN",    # set to OK if you treat free as OK
+        "no_license": "CRIT",
+        "unavailable": "WARN",
+        "other": "WARN",
+    },
+    "expiry": {
+        "warn_days": 14,
+        "crit_days": 3,
+        "warn_severity": "WARN",
+        "crit_severity": "CRIT",
+        "expired_severity": "CRIT",
+    },
+    "fortiguard_connectivity": {
+        "issue_severity": "WARN",  # choose "WARN" or "CRIT" or "OK"
+    },
+    # List of module names to ignore globally
+    "ignore_modules": [],
+    # Per-module overrides (exact or regex match)
+    # Example:
+    # [
+    #   {"match": "antivirus", "match_type": "exact", "ignore": False,
+    #    "status_severity": {"licensed":"OK","free_license":"OK","no_license":"CRIT","other":"WARN"},
+    #    "expiry": {"warn_days":30,"crit_days":7,"warn_severity":"WARN","crit_severity":"CRIT","expired_severity":"CRIT"}}
+    # ]
+    "overrides": [],
+}
+
+def _state_from_text(name: str) -> State:
+    m = {"OK": State.OK, "WARN": State.WARN, "CRIT": State.CRIT, "UNKNOWN": State.UNKNOWN}
+    return m.get(str(name).strip().upper(), State.UNKNOWN)
+
+def _fmt_date(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+    except Exception:
+        return str(ts)
+
+def _days_left(now_ts: int, exp_ts: int) -> int:
+    return int((exp_ts - now_ts) // 86400)
+
+def _match_override(name: str, overrides: list[dict]) -> dict | None:
+    """Return first override that matches module name."""
+    for ov in overrides or []:
+        mtype = str(ov.get("match_type", "exact")).lower()
+        pat = ov.get("match")
+        if not pat:
+            continue
+        if mtype == "regex":
+            try:
+                if re.search(pat, name):
+                    return ov
+            except re.error:
+                continue
+        else:  # exact
+            if name == pat:
+                return ov
+    return None
+
+def _merge_params_for_module(module: str, params: dict) -> dict:
+    """Merge defaults with per-module override, if any."""
+    p = {**DEFAULT_LICENSE_PARAMS, **(params or {})}
+    ov = _match_override(module, p.get("overrides"))
+    if ov:
+        # deep-merge status_severity / expiry if provided
+        merged_status = {**p["status_severity"], **ov.get("status_severity", {})}
+        merged_expiry = {**p["expiry"], **ov.get("expiry", {})}
+        p = {**p, **ov}
+        p["status_severity"] = merged_status
+        p["expiry"] = merged_expiry
+    return p
+
+def discover_fortigate_license(section):
+    """Aggregated service (one per host)."""
+    if section and section.get("status") == "success":
+        yield Service()
+
+def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
+    """Aggregated license evaluation with param support."""
+    if not section:
+        yield Result(state=State.UNKNOWN, summary="No license data received")
+        return
+
+    if "error" in section or section.get("status") == "error":
+        msg = section.get("message") or section.get("error") or "Cannot retrieve license information"
+        detail = section.get("detail")
+        yield Result(state=State.WARN, summary=f"Cannot check licenses: {msg}", details=(detail or None))
+        return
+
+    if section.get("status") != "success":
+        yield Result(state=State.WARN, summary="Cannot retrieve license information")
+        return
+
+    results = section.get("results") or {}
+    if not isinstance(results, dict):
+        yield Result(state=State.UNKNOWN, summary="Invalid license payload format")
+        return
+
+    # FortiGuard connectivity handling (not a license status)
+    fortiguard_issue = False
+    fortiguard_reason = None
+    fg_entry = results.get("fortiguard")
+    if isinstance(fg_entry, dict):
+        connected = bool(fg_entry.get("connected", True))
+        conn_issue = bool(fg_entry.get("connection_issue", False))
+        if (not connected) or conn_issue:
+            fortiguard_issue = True
+            fortiguard_reason = "FortiGuard not connected" if not connected else "FortiGuard connection_issue=true"
+
+    # Global ignores
+    global_ignore = set(x.strip() for x in (params or {}).get("ignore_modules", []) if str(x).strip())
+
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+
+    total_modules = 0
+    licensed_modules = 0
+    free_modules = 0
+    no_license_modules = 0
+    expired_list = []
+    exp_crit_list = []
+    exp_warn_list = []
+
+    earliest_name = None
+    earliest_ts = None
+    earliest_days = None
+
+    # Iterate modules
+    for name, entry in results.items():
+        if not isinstance(entry, dict):
+            continue
+        if name == "fortiguard":
+            continue  # handled separately
+        if name in global_ignore:
+            continue
+
+        total_modules += 1
+
+        # Compute module-specific params (overrides)
+        mp = _merge_params_for_module(name, params or {})
+
+        if mp.get("ignore"):
+            # Module explicitly ignored by override
+            continue
+
+        status_lower = str(entry.get("status") or "").lower()
+        if status_lower == "licensed":
+            licensed_modules += 1
+        elif status_lower == "free_license":
+            free_modules += 1
+        elif status_lower == "no_license":
+            no_license_modules += 1
+
+        # Track earliest expiry
+        exp_ts = entry.get("expires")
+        if isinstance(exp_ts, (int, float, str)):
+            try:
+                exp_ts = int(exp_ts)
+            except Exception:
+                exp_ts = None
+        else:
+            exp_ts = None
+
+        if exp_ts:
+            dleft = _days_left(now_ts, exp_ts)
+            if earliest_ts is None or exp_ts < earliest_ts:
+                earliest_ts = exp_ts
+                earliest_days = dleft
+                earliest_name = name
+
+            if dleft < 0:
+                expired_list.append((name, exp_ts))
+            elif dleft <= int(mp["expiry"]["crit_days"]):
+                exp_crit_list.append((name, dleft, exp_ts))
+            elif dleft <= int(mp["expiry"]["warn_days"]):
+                exp_warn_list.append((name, dleft, exp_ts))
+
+    # Build summary
+    summary_parts = [
+        f"Licensed: {licensed_modules}/{total_modules}",
+        f"Free: {free_modules}",
+        f"No license: {no_license_modules}",
+    ]
+    if earliest_ts is not None:
+        if earliest_days is not None and earliest_days >= 0:
+            summary_parts.append(f"Earliest expiry: {earliest_name} in {earliest_days}d ({_fmt_date(earliest_ts)})")
+        else:
+            summary_parts.append(f"Earliest expiry: {earliest_name} expired on {_fmt_date(earliest_ts)}")
+    if fortiguard_issue:
+        summary_parts.append("FortiGuard connectivity: issue")
+
+    # Decide overall state
+    overall = State.OK
+    details_lines = []
+
+    # Expiry driven states
+    if expired_list:
+        overall = max(overall, _state_from_text((params or DEFAULT_LICENSE_PARAMS)["expiry"]["expired_severity"]))
+        details_lines.append("Expired:")
+        for name, ts in sorted(expired_list, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: expired on {_fmt_date(ts)}")
+
+    if exp_crit_list:
+        overall = max(overall, _state_from_text((params or DEFAULT_LICENSE_PARAMS)["expiry"]["crit_severity"]))
+        details_lines.append(f"Expiring within {(params or DEFAULT_LICENSE_PARAMS)['expiry']['crit_days']} days:")
+        for name, dleft, ts in sorted(exp_crit_list, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: {dleft}d left (until {_fmt_date(ts)})")
+
+    if exp_warn_list:
+        overall = max(overall, _state_from_text((params or DEFAULT_LICENSE_PARAMS)["expiry"]["warn_severity"]))
+        details_lines.append(f"Expiring within {(params or DEFAULT_LICENSE_PARAMS)['expiry']['warn_days']} days:")
+        for name, dleft, ts in sorted(exp_warn_list, key=lambda x: x[1]):
+            details_lines.append(f"  - {name}: {dleft}d left (until {_fmt_date(ts)})")
+
+    # FortiGuard connectivity severity
+    if fortiguard_issue:
+        overall = max(overall, _state_from_text((params or DEFAULT_LICENSE_PARAMS)["fortiguard_connectivity"]["issue_severity"]))
+        details_lines.append(f"FortiGuard: {fortiguard_reason}")
+
+    yield Result(
+        state=overall,
+        summary=("All licenses OK" if overall is State.OK else "License issues") + " | " + " | ".join(summary_parts),
+        details="\n".join(details_lines) if details_lines else None,
+    )
+
+    # Perfdata
+    yield Metric("licenses_total", total_modules)
+    yield Metric("licenses_licensed", licensed_modules)
+    yield Metric("licenses_free", free_modules)
+    yield Metric("licenses_no_license", no_license_modules)
+    yield Metric("licenses_expiring_soon", len(exp_warn_list) + len(exp_crit_list))
+    yield Metric("licenses_expired", len(expired_list))
+    if earliest_ts is not None and (earliest_days is not None) and earliest_days >= 0:
+        yield Metric("days_to_earliest_expiry", earliest_days)
 
 # =============================================================================
 # FORTIGATE SYSTEM
@@ -689,6 +931,81 @@ def check_fortigate_license(section):
         yield Metric("days_to_earliest_expiry", earliest_days)
 
 # =============================================================================
+# FORTIGATE LICENSES (PER-MODULE ITEMIZED SERVICES)
+# =============================================================================
+
+def discover_fortigate_license_item(section):
+    """Create one service per module (excluding FortiGuard/ignored)."""
+    if not section or section.get("status") != "success":
+        return
+
+    results = section.get("results") or {}
+    if not isinstance(results, dict):
+        return
+
+    for name, entry in results.items():
+        if not isinstance(entry, dict):
+            continue
+        if name == "fortiguard":
+            continue
+        # Always discover; ignoring is handled in check via parameters.
+        yield Service(item=name)
+
+def check_fortigate_license_item(item, section, params=DEFAULT_LICENSE_PARAMS):
+    """Evaluate a single module."""
+    if not section or section.get("status") != "success":
+        yield Result(state=State.UNKNOWN, summary="No license data received")
+        return
+
+    results = section.get("results") or {}
+    entry = results.get(item)
+    if not isinstance(entry, dict):
+        yield Result(state=State.UNKNOWN, summary=f"Module {item}: no data")
+        return
+
+    # Merge params with overrides
+    p = _merge_params_for_module(item, params or {})
+    if p.get("ignore") or (item in set(x.strip() for x in (params or {}).get("ignore_modules", []))):
+        yield Result(state=State.OK, summary=f"{item}: ignored by rule")
+        return
+
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    status_lower = str(entry.get("status") or "").lower()
+    exp_ts = None
+    if isinstance(entry.get("expires"), (int, float, str)):
+        try:
+            exp_ts = int(entry["expires"])
+        except Exception:
+            exp_ts = None
+
+    # Base state from status mapping
+    status_map = p["status_severity"]
+    state = _state_from_text(status_map.get(status_lower, status_map.get("other", "WARN")))
+    details = [f"Status: {status_lower or 'n/a'}"]
+
+    # Expiry thresholds
+    if exp_ts:
+        dleft = _days_left(now_ts, exp_ts)
+        details.append(f"Expiry: {_fmt_date(exp_ts)} ({dleft}d left)")
+        if dleft < 0:
+            state = max(state, _state_from_text(p["expiry"]["expired_severity"]))
+        elif dleft <= int(p["expiry"]["crit_days"]):
+            state = max(state, _state_from_text(p["expiry"]["crit_severity"]))
+        elif dleft <= int(p["expiry"]["warn_days"]):
+            state = max(state, _state_from_text(p["expiry"]["warn_severity"]))
+
+    yield Result(
+        state=state,
+        summary=f"{item}: {status_lower or 'n/a'}",
+        details="\n".join(details),
+    )
+
+    # Perfdata for item
+    if exp_ts:
+        dleft = _days_left(now_ts, exp_ts)
+        if dleft >= 0:
+            yield Metric("days_to_expiry", dleft)
+# =============================================================================
 # PLUGIN REGISTRATION
 # =============================================================================
 
@@ -721,11 +1038,12 @@ agent_section_fortigate_license = AgentSection(
     parse_function=parse_fortigate_license,
 )
 
-check_plugin_fortigate_license = CheckPlugin(
-    name="fortigate_license",
-    service_name="FortiGate Licenses",
-    discovery_function=discover_fortigate_license,
-    check_function=check_fortigate_license,
+check_plugin_fortigate_license_item = CheckPlugin(
+    name="fortigate_license.item",               # different plugin name
+    sections=["fortigate_license"],              # reuse same agent section
+    service_name="FortiGate License %s",
+    discovery_function=discover_fortigate_license_item,
+    check_function=check_fortigate_license_item,
+    check_ruleset_name="fortigate_license",      # reuse same ruleset
+    check_default_parameters=DEFAULT_LICENSE_PARAMS,
 )
-
-
