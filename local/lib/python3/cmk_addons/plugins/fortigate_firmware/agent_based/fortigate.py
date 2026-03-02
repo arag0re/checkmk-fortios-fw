@@ -1023,6 +1023,8 @@ check_plugin_fortigate_license = CheckPlugin(
     service_name="FortiGate Licenses",
     discovery_function=discover_fortigate_license,
     check_function=check_fortigate_license,
+    check_ruleset_name="fortigate_license",               # <-- add
+    check_default_parameters=DEFAULT_LICENSE_PARAMS,      # <-- add
 )
 
 check_plugin_fortigate_license_item = CheckPlugin(
@@ -1034,5 +1036,3 @@ check_plugin_fortigate_license_item = CheckPlugin(
     check_ruleset_name="fortigate_license",
     check_default_parameters=DEFAULT_LICENSE_PARAMS,
 )
-
-
