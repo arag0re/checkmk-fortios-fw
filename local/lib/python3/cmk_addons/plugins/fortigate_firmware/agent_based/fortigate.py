@@ -700,26 +700,20 @@ def check_fortigate_firmware(section):
         yield Metric("builds_behind_latest", builds_behind_latest)
         yield Metric("major_versions_behind", major_versions_behind)
         yield Metric("minor_versions_behind", minor_versions_behind)
-
 # =============================================================================
 # FORTIGATE LICENSES (CONSOLIDATED, PARAMETERIZED)
 # =============================================================================
-
-
-# ---- Parser: return {} instead of None so discovery can still run
+# ---- Parser: be permissive so discovery still yields a service on parse error
 def parse_fortigate_license(string_table):
-    """Parse fortigate_license section"""
     if not string_table:
-        return {}  # return empty dict, not None -> discovery can still create service
+        return {}  # empty dict -> discovery can still yield a service
     try:
-        flatlist = list(itertools.chain.from_iterable(string_table))
-        return json.loads(" ".join(flatlist))
-    except (json.JSONDecodeError, ValueError, TypeError):
-        # Still return a dict so discovery yields a service and check can show the parse error
+        flat = list(itertools.chain.from_iterable(string_table))
+        return json.loads(" ".join(flat))
+    except Exception:
         return {"status": "error", "error": "parse", "message": "JSON parse failed"}
 
-
-# ---- Defaults (tunable via WATO) ----
+# ---- Defaults (tunable via WATO)
 DEFAULT_LICENSE_PARAMS = {
     "status_severity": {
         "licensed": "OK",
@@ -735,16 +729,15 @@ DEFAULT_LICENSE_PARAMS = {
         "crit_severity": "CRIT",
         "expired_severity": "CRIT",
     },
-    "fortiguard_connectivity": {
-        "issue_severity": "WARN",
-    },
+    "fortiguard_connectivity": { "issue_severity": "WARN" },
     "ignore_modules": [],
-    "overrides": [],   # list of dicts with match/match_type/ignore/status_severity/expiry keys
+    "overrides": [],  # list of dicts with match/match_type/ignore/status_severity/expiry
 }
 
 def _state_from_text(name: str) -> State:
-    m = {"OK": State.OK, "WARN": State.WARN, "CRIT": State.CRIT, "UNKNOWN": State.UNKNOWN}
-    return m.get(str(name).strip().upper(), State.UNKNOWN)
+    return {
+        "OK": State.OK, "WARN": State.WARN, "CRIT": State.CRIT, "UNKNOWN": State.UNKNOWN
+    }.get(str(name).strip().upper(), State.UNKNOWN)
 
 def _fmt_date(ts: int) -> str:
     try:
@@ -756,7 +749,6 @@ def _days_left(now_ts: int, exp_ts: int) -> int:
     return int((exp_ts - now_ts) // 86400)
 
 def _match_override(name: str, overrides: list[dict]) -> dict | None:
-    """Return first override that matches module name."""
     for ov in overrides or []:
         mtype = str(ov.get("match_type", "exact")).lower()
         pat = ov.get("match")
@@ -768,13 +760,12 @@ def _match_override(name: str, overrides: list[dict]) -> dict | None:
                     return ov
             except re.error:
                 continue
-        else:  # exact
+        else:
             if name == pat:
                 return ov
     return None
 
 def _merge_params_for_module(module: str, params: dict) -> dict:
-    """Merge defaults with per-module override (deep for status/expiry)."""
     p = {**DEFAULT_LICENSE_PARAMS, **(params or {})}
     ov = _match_override(module, p.get("overrides"))
     if ov:
@@ -785,12 +776,12 @@ def _merge_params_for_module(module: str, params: dict) -> dict:
         p["expiry"] = merged_expiry
     return p
 
-# ---- Discovery: do not require 'status' to be 'success'
+# ---- Aggregated service (one per host)
 def discover_fortigate_license(section):
-    """Aggregated service (one per host) - permissive discovery"""
+    # Permissive discovery: if parser returned any dict, show the service
     if isinstance(section, dict):
         yield Service()
-        
+
 def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
     if not section:
         yield Result(state=State.UNKNOWN, summary="No license data received")
@@ -811,7 +802,7 @@ def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
         yield Result(state=State.UNKNOWN, summary="Invalid license payload format")
         return
 
-    # FortiGuard connectivity (not counted as a license)
+    # FortiGuard connectivity
     fortiguard_issue = False
     fortiguard_reason = None
     fg_entry = results.get("fortiguard")
@@ -825,16 +816,9 @@ def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
     global_ignore = set(x.strip() for x in (params or {}).get("ignore_modules", []) if str(x).strip())
     now_ts = int(datetime.now(tz=timezone.utc).timestamp())
 
-    total_modules = 0
-    licensed_modules = 0
-    free_modules = 0
-    no_license_modules = 0
-    expired_list = []
-    exp_crit_list = []
-    exp_warn_list = []
-    earliest_name = None
-    earliest_ts = None
-    earliest_days = None
+    total_modules = licensed_modules = free_modules = no_license_modules = 0
+    expired_list, exp_crit_list, exp_warn_list = [], [], []
+    earliest_name = earliest_ts = earliest_days = None
 
     for name, entry in results.items():
         if not isinstance(entry, dict):
@@ -845,7 +829,6 @@ def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
             continue
 
         total_modules += 1
-
         mp = _merge_params_for_module(name, params or {})
         if mp.get("ignore"):
             continue
@@ -867,9 +850,7 @@ def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
         if exp_ts:
             dleft = _days_left(now_ts, exp_ts)
             if earliest_ts is None or exp_ts < earliest_ts:
-                earliest_ts = exp_ts
-                earliest_days = dleft
-                earliest_name = name
+                earliest_ts, earliest_days, earliest_name = exp_ts, dleft, name
 
             if dleft < 0:
                 expired_list.append((name, exp_ts))
@@ -931,7 +912,7 @@ def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
     if earliest_ts is not None and (earliest_days is not None) and earliest_days >= 0:
         yield Metric("days_to_earliest_expiry", earliest_days)
 
-# ---- Itemized per-module services (optional) ----
+# ---- Itemized services (optional)
 def discover_fortigate_license_item(section):
     if not section or section.get("status") != "success":
         return
@@ -983,9 +964,9 @@ def check_fortigate_license_item(item, section, params=DEFAULT_LICENSE_PARAMS):
             state = max(state, _state_from_text(p["expiry"]["warn_severity"]))
 
     yield Result(state=state, summary=f"{item}: {status_lower or 'n/a'}", details="\n".join(details))
-    if exp_ts:
-        if dleft >= 0:
-            yield Metric("days_to_expiry", dleft)
+    if exp_ts and dleft >= 0:
+        yield Metric("days_to_expiry", dleft)
+
 # =============================================================================
 # PLUGIN REGISTRATION
 # =============================================================================
