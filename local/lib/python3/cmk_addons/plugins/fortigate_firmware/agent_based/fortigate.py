@@ -453,7 +453,7 @@ def check_fortigate_firmware(section):
             continue
         if current_platform_id:
             fw_platform = _platform_id(fw)
-            if fw_platform and fw_platform != current_platform_id:
+            if fw_platform != current_platform_id:
                 skipped_incompatible += 1
                 continue
         available_fw.append(fw)
