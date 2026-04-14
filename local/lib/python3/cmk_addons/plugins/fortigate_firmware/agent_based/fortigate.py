@@ -513,10 +513,17 @@ def check_fortigate_firmware(section):
     major_versions_behind = 0
     minor_versions_behind = 0
 
+    
     if highest_fw:
-        high_build = _to_int(highest_fw.get("build"))
-        if high_build > current_build_int:
-            builds_behind_latest = high_build - current_build_int
+        if (
+            _to_int(highest_fw.get("major")) == current_major_int
+            and _to_int(highest_fw.get("minor")) == current_minor_int
+        ):
+            high_build = _to_int(highest_fw.get("build"))
+            if high_build > current_build_int:
+                builds_behind_latest = high_build - current_build_int
+        else:
+            builds_behind_latest = 0  # build gap meaningless across branches
 
         high_major = _to_int(highest_fw.get("major"))
         high_minor = _to_int(highest_fw.get("minor"))
@@ -617,11 +624,17 @@ def check_fortigate_firmware(section):
             reasons.append("Current version deprecated (F-level) with many newer in branch")
         return is_crit, reasons
 
+
     if consider_branch_change_critical:
         is_critical = is_critical_all
         critical_reasons = critical_reasons_all
     else:
         is_critical, critical_reasons = _same_branch_criticality()
+
+    if branch_change_available and not has_same_branch_updates:
+        # Only feature branch available → never CRITICAL
+        is_critical = False
+        critical_reasons = []
 
     details_parts = []
     if recommended_fw:
@@ -700,6 +713,8 @@ def check_fortigate_firmware(section):
         yield Metric("builds_behind_latest", builds_behind_latest)
         yield Metric("major_versions_behind", major_versions_behind)
         yield Metric("minor_versions_behind", minor_versions_behind)
+
+        
 # =============================================================================
 # FORTIGATE LICENSES (CONSOLIDATED, PARAMETERIZED)
 # =============================================================================
