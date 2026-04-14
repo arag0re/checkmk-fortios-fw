@@ -453,7 +453,7 @@ def check_fortigate_firmware(section):
             continue
         if current_platform_id:
             fw_platform = _platform_id(fw)
-            if fw_platform != current_platform_id:
+            if fw_platform and fw_platform != current_platform_id:
                 skipped_incompatible += 1
                 continue
         available_fw.append(fw)
@@ -496,8 +496,12 @@ def check_fortigate_firmware(section):
         else:
             next_branch_updates.append(fw)
 
-        if highest_fw is None or fw_tuple > _version_tuple(highest_fw):
-            highest_fw = fw
+        fw_major = _to_int(fw.get("major"))
+        fw_minor = _to_int(fw.get("minor"))
+
+        if fw_major == current_major_int and fw_minor == current_minor_int:
+            if highest_fw is None or fw_tuple > _version_tuple(highest_fw):
+                highest_fw = fw
 
     if not newer_updates:
         yield Result(
