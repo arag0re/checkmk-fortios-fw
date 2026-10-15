@@ -279,7 +279,7 @@ def discover_fortigate_system(section):
     if isinstance(section, dict):
         yield Service()
 
-def check_fortigate_system(params, section):
+def check_fortigate_system(section):
     """Check function for FortiGate System"""
     if not isinstance(section, dict) or not section:
         yield Result(state=State.UNKNOWN, summary="No data received")
@@ -366,7 +366,7 @@ def discover_fortigate_firmware(section):
     if isinstance(section, dict):
         yield Service()
 
-def check_fortigate_firmware(params, section):
+def check_fortigate_firmware(section):
     """Check function for Fortigate Firmware - Enhanced with CRITICAL logic"""
     if not isinstance(section, dict) or not section:
         yield Result(state=State.UNKNOWN, summary="No firmware data received")
