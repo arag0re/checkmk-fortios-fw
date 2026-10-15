@@ -14,7 +14,6 @@ from cmk.agent_based.v2 import (
 )
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
-from typing import List, Tuple
 import itertools, re, json
 
 # =============================================================================
@@ -101,7 +100,7 @@ def discover_fortigate_license(section):
     if section and section.get("status") == "success":
         yield Service()
 
-def check_fortigate_license(section, params=DEFAULT_LICENSE_PARAMS):
+def check_fortigate_license(params, section):
     """Aggregated license evaluation with param support."""
     if not section:
         yield Result(state=State.UNKNOWN, summary="No license data received")
@@ -280,7 +279,7 @@ def discover_fortigate_system(section):
     if section and section.get("status") == "success":
         yield Service()
 
-def check_fortigate_system(section):
+def check_fortigate_system(params, section):
     """Check function for FortiGate System"""
     if not section:
         yield Result(state=State.UNKNOWN, summary="No data received")
@@ -357,7 +356,7 @@ def discover_fortigate_firmware(section):
     if section:
         yield Service()
 
-def check_fortigate_firmware(section):
+def check_fortigate_firmware(params, section):
     """Check function for Fortigate Firmware - Enhanced with CRITICAL logic"""
     if not section:
         yield Result(state=State.UNKNOWN, summary="No firmware data received")
