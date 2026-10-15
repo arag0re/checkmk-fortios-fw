@@ -293,22 +293,32 @@ def check_fortigate_system(params, section):
 
         # Map connectivity to UNKNOWN, auth/ssl/http to CRIT
         unknown_hints = ["no route to host", "failed to connect", "failed to establish", "dns", "resolution", "refused", "timed out", "timeout"]
-        is_unknown = err_type in ("connection", "timeout") or any(h in str(msg).lower() for h in unknown_hints) or any(h in str(detail).lower() for h in unknown_hints) if detail else False
+        is_unknown = (
+            err_type in ("connection", "timeout")
+            or any(hint in str(msg).lower() for hint in unknown_hints)
+            or (
+                detail is not None
+                and any(hint in str(detail).lower() for hint in unknown_hints)
+            )
+        )
         state = State.UNKNOWN if is_unknown else State.CRIT
 
         yield Result(state=state, summary=msg, details=(detail or None))
         return
 
-    if section.get("status") != "success":
+    if section.get("status", "success") != "success":
         yield Result(state=State.CRIT, summary="FortiGate API request failed")
         return
     
     # Extract real FortiGate data structure
-    version = section.get("version", "Unknown")
-    build = section.get("build", "Unknown") 
-    serial = section.get("serial", "Unknown")
-    
-    results = section.get("results", {})
+    results = section.get("results")
+    if not isinstance(results, dict):
+        results = {}
+
+    version = section.get("version", results.get("version", "Unknown"))
+    build = section.get("build", results.get("build", "Unknown"))
+    serial = section.get("serial", results.get("serial", "Unknown"))
+
     hostname = results.get("hostname", "Unknown")
     model = results.get("model", "Unknown")
     model_name = results.get("model_name", "Unknown")
@@ -416,10 +426,16 @@ def check_fortigate_firmware(params, section):
             return 0
 
     def _version_tuple(fw: Dict[str, Any]) -> tuple[int, int, int, int]:
+        version_match = re.search(r"(\d+)\.(\d+)\.(\d+)", str(fw.get("version", "")))
+        version_parts = (
+            tuple(int(part) for part in version_match.groups())
+            if version_match is not None
+            else (0, 0, 0)
+        )
         return (
-            _to_int(fw.get("major")),
-            _to_int(fw.get("minor")),
-            _to_int(fw.get("patch")),
+            _to_int(fw.get("major")) if fw.get("major") is not None else version_parts[0],
+            _to_int(fw.get("minor")) if fw.get("minor") is not None else version_parts[1],
+            _to_int(fw.get("patch")) if fw.get("patch") is not None else version_parts[2],
             _to_int(fw.get("build")),
         )
 
@@ -436,10 +452,18 @@ def check_fortigate_firmware(params, section):
             return False
         return str(maturity).strip().upper().startswith("M")
 
-    current_major_int = _to_int(current_fw.get("major"))
-    current_minor_int = _to_int(current_fw.get("minor"))
-    current_build_int = _to_int(current_fw.get("build"))
     current_tuple = _version_tuple(current_fw)
+    current_major_int, current_minor_int = current_tuple[:2]
+    current_build_int = current_tuple[3]
+
+    if current_version == "Unknown" and current_tuple[:3] != (0, 0, 0):
+        current_version = ".".join(str(part) for part in current_tuple[:3])
+    elif current_version == "Unknown":
+        yield Result(
+            state=State.UNKNOWN,
+            summary="Current FortiGate firmware version is missing",
+        )
+        return
 
     current_platform_id = _platform_id(current_fw)
     available_fw = []
