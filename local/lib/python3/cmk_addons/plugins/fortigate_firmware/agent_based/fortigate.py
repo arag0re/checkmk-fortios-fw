@@ -276,12 +276,12 @@ def parse_fortigate_system(string_table):
 
 def discover_fortigate_system(section):
     """Discovery function for FortiGate System"""
-    if section and section.get("status") == "success":
+    if isinstance(section, dict):
         yield Service()
 
 def check_fortigate_system(params, section):
     """Check function for FortiGate System"""
-    if not section:
+    if not isinstance(section, dict) or not section:
         yield Result(state=State.UNKNOWN, summary="No data received")
         return
 
@@ -353,12 +353,12 @@ def parse_fortigate_firmware(string_table):
 
 def discover_fortigate_firmware(section):
     """Discovery function for Fortigate Firmware"""
-    if section:
+    if isinstance(section, dict):
         yield Service()
 
 def check_fortigate_firmware(params, section):
     """Check function for Fortigate Firmware - Enhanced with CRITICAL logic"""
-    if not section:
+    if not isinstance(section, dict) or not section:
         yield Result(state=State.UNKNOWN, summary="No firmware data received")
         return
 
