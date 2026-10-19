@@ -38,7 +38,11 @@ def _status_severity_form(*, optional: bool) -> Dictionary:
             ),
             "free_license": DictElement(
                 required=not optional,
-                parameter_form=_severity_form("Free license", "WARN"),
+                parameter_form=_severity_form("Free license", "OK"),
+            ),
+            "registered": DictElement(
+                required=not optional,
+                parameter_form=_severity_form("Registered", "OK"),
             ),
             "no_license": DictElement(
                 required=not optional,
