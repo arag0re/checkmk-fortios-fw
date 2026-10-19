@@ -24,7 +24,8 @@ import itertools, re, json
 DEFAULT_LICENSE_PARAMS = {
     "status_severity": {           # overall default severity by module status
         "licensed": "OK",
-        "free_license": "WARN",    # set to OK if you treat free as OK
+        "free_license": "OK",    # set to OK if you treat free as OK
+        "registered": "OK",
         "no_license": "CRIT",
         "unavailable": "WARN",
         "other": "WARN",
